@@ -99,8 +99,7 @@ module RubyLLM
     def determine_mime_type
       return @mime_type = active_storage_content_type if active_storage? && active_storage_content_type.present?
 
-      @mime_type = RubyLLM::MimeType.for(@source, name: @filename)
-      @mime_type = RubyLLM::MimeType.for(content) if @mime_type == 'application/octet-stream'
+      @mime_type = safe_mime_type_detection
       @mime_type = 'audio/wav' if @mime_type == 'audio/x-wav' # Normalize WAV type
     end
 
@@ -159,6 +158,33 @@ module RubyLLM
       when ActiveStorage::Attached::Many
         @source.blobs.first&.content_type
       end
+    end
+
+    def safe_mime_type_detection
+      # For URLs, use content-based detection but avoid the Marcel/open-uri compatibility issue
+      # by fetching content first, then using Marcel on the content data
+      if url?
+        content_data = content
+        require 'stringio'
+        RubyLLM::MimeType.for(StringIO.new(content_data), name: @filename)
+      else
+        # For local files, use the original approach
+        mime_type = RubyLLM::MimeType.for(@source, name: @filename)
+        mime_type == 'application/octet-stream' ? RubyLLM::MimeType.for(content) : mime_type
+      end
+    rescue ArgumentError => e
+      # Handle any remaining "wrong number of arguments" errors
+      raise e unless e.message.include?('wrong number of arguments')
+
+      RubyLLM.logger.warn "Marcel compatibility issue detected: #{e.message}"
+      'application/octet-stream'
+    rescue Faraday::ResourceNotFound, Faraday::ConnectionFailed, Errno::ENOENT => e
+      # Re-raise network/file errors to preserve original behavior
+      raise e
+    rescue StandardError => e
+      # Handle other potential errors during MIME detection
+      RubyLLM.logger.warn "Error during MIME type detection: #{e.class}: #{e.message}"
+      'application/octet-stream'
     end
   end
 end
